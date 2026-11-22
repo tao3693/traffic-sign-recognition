@@ -1,0 +1,35 @@
+# ===== Global configuration =====
+# Every experiment reads its hyper-parameters from here.
+# Override any value from the command line, e.g.:
+#   python -m src.train --model resnet18 --lr 0.0001 --epochs 10
+
+seed: 42
+
+# ---- data ----
+data_dir: data/GTSRB          # created by download_data.py
+img_size: 48                  # CNN: 32/48, ResNet: 64 or larger
+val_ratio: 0.2                # validation split, done BY TRACK (no leakage)
+crop_roi: true                # crop the sign using the ROI in the CSV
+augment: true                 # rotation / affine / colour jitter (no flip!)
+balanced_sampling: true       # WeightedRandomSampler for class imbalance
+num_workers: 2
+
+# ---- model ----
+model: cnn                    # cnn | resnet18
+pretrained: true              # resnet18 only: ImageNet weights
+freeze_backbone: false        # resnet18 only: train classifier head only
+dropout: 0.3
+
+# ---- optimisation ----
+epochs: 15
+batch_size: 64
+optimizer: adam               # adam | sgd
+lr: 0.001
+weight_decay: 0.0001
+label_smoothing: 0.0
+grad_clip: 5.0                # max gradient norm (0 = disabled)
+early_stop_patience: 5
+
+# ---- output ----
+results_dir: results
+weights_dir: weights

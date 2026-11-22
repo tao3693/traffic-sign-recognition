@@ -1,0 +1,21 @@
+# dataset & large files (do NOT commit)
+data/*
+!data/.gitkeep
+weights/*
+!weights/.gitkeep
+*.zip
+*.pt
+*.pth
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
