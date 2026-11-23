@@ -4,7 +4,13 @@ from torchvision import models
 
 
 def build_resnet18(num_classes: int = 43, pretrained: bool = True,
-                   freeze_backbone: bool = False) -> nn.Module:
+                   freeze_backbone: bool = False, small_input: bool = False) -> nn.Module:
+    """
+    small_input=True adapts ResNet18 to small images (as in CIFAR-style ResNets):
+    the 7x7 stride-2 conv1 is replaced by a 3x3 stride-1 conv and the max-pool is removed,
+    so the network down-samples 8x instead of 32x. conv1 is then trained from scratch;
+    all other layers keep their ImageNet weights.
+    """
     weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
     model = models.resnet18(weights=weights)
 
@@ -12,6 +18,9 @@ def build_resnet18(num_classes: int = 43, pretrained: bool = True,
         for p in model.parameters():
             p.requires_grad = False
 
+    if small_input:                           # new layers are trainable
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        model.maxpool = nn.Identity()
+
     model.fc = nn.Linear(model.fc.in_features, num_classes)  # new head is trainable
-    model.gradcam_layer = model.layer4[-1]
     return model

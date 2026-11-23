@@ -26,14 +26,19 @@ Grad-CAM heat-maps show which part of the image the model looked at.
   Step 2  Download the dataset (about 350 MB, saved in data/)
             python main.py --download
   Step 3  Train a model (or put the provided weights file in weights/)
-            python main.py --train                 (custom CNN)
-            python main.py --train --model resnet18
+            python main.py --train                 (custom CNN, 48x48 input)
+            python main.py --train --model resnet18   (ResNet18, 96x96 input)
+          The best model of each type is kept as weights/best_cnn.pt and
+          weights/best_resnet18.pt (only replaced when a new run is better).
   Step 4  Use the program
             python main.py                         (opens the GUI)
             python main.py --image my_sign.png     (prediction in terminal)
             python main.py --image my_sign.png --gradcam
+            python main.py --image my_sign.png --model resnet18
+          NOTE: the models are trained on images cropped around the sign, so
+          use images that are cropped tightly around the sign.
   Step 5  Evaluate on the official test set
-            python main.py --evaluate --weights weights/latest_cnn.pt
+            python main.py --evaluate --weights weights/best_cnn.pt
 
 4. PROJECT STRUCTURE
 --------------------
@@ -46,6 +51,7 @@ Grad-CAM heat-maps show which part of the image the model looked at.
   src/evaluate.py    test accuracy, classification report, confusion matrix
   src/gradcam.py     Grad-CAM visualisation
   src/eda.py         dataset statistics and figures for the report
+  tests/             smoke tests (run: pytest -q)
   results/           experiment logs and figures
   weights/           trained model files
 
@@ -54,8 +60,10 @@ Grad-CAM heat-maps show which part of the image the model looked at.
   python -m src.train --lr 0.01
   python -m src.train --optimizer sgd --lr 0.01
   python -m src.train --augment false --tag noaug
-  python -m src.train --model resnet18 --img_size 64 --freeze_backbone true
-Every run adds one row to results/experiments.csv.
+  python -m src.train --model resnet18 --freeze_backbone true
+  python -m src.train --model resnet18 --small_input true --img_size 64
+Every run adds one row to results/experiments.csv. The experiment name
+encodes the settings, so runs never overwrite each other.
 
 6. DATASET
 ----------

@@ -1,8 +1,11 @@
-torch>=2.0
+# Tested with Python 3.9-3.13. Every training run also logs the python / torch versions
+# and the device to results/experiments.csv. For the report, record the exact versions:
+#   pip freeze > results/environment.txt
+torch>=2.0,<3
 torchvision>=0.15
-numpy
-pillow
-matplotlib
-scikit-learn
-pyyaml
-tqdm
+numpy<3
+pillow>=9
+matplotlib>=3.5
+scikit-learn>=1.0
+pyyaml>=6
+tqdm>=4

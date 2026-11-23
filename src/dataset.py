@@ -10,6 +10,10 @@ Key design decisions (explain these in the report, section "Data set"):
     (e.g. "turn left" <-> "turn right").
   * Class imbalance (~210 to ~2250 images per class) is handled with
     WeightedRandomSampler (weight = 1 / class frequency).
+  * Inputs are normalised with GTSRB statistics by default; `normalize: imagenet`
+    uses the ImageNet statistics the pre-trained ResNet18 was trained with.
+  * Training uses the ROI crop, so images given to the GUI / --image should be
+    tightly cropped around the sign as well (see README).
 """
 import csv
 import os
@@ -23,9 +27,15 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 
-# Per-channel mean / std of GTSRB training images (RGB, range 0-1)
+from src.utils import seed_worker
+
+# Per-channel mean / std of GTSRB training images (RGB, range 0-1).
+# Re-compute with `python -m src.eda --stats` and update if they differ.
 GTSRB_MEAN = (0.3403, 0.3121, 0.3214)
 GTSRB_STD = (0.2724, 0.2608, 0.2669)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+NORM_STATS = {"gtsrb": (GTSRB_MEAN, GTSRB_STD), "imagenet": (IMAGENET_MEAN, IMAGENET_STD)}
 
 
 @dataclass
@@ -114,7 +124,13 @@ class GTSRBDataset(Dataset):
         return [s.label for s in self.samples]
 
 
-def build_transforms(img_size: int, train: bool, augment: bool = True):
+def norm_stats(cfg: dict):
+    """(mean, std) used by this config; old checkpoints without the key use GTSRB stats."""
+    return NORM_STATS[cfg.get("normalize", "gtsrb")]
+
+
+def build_transforms(img_size: int, train: bool, augment: bool = True, normalize: str = "gtsrb"):
+    mean, std = NORM_STATS[normalize]
     steps = [transforms.Resize((img_size, img_size))]
     if train and augment:
         steps += [
@@ -122,33 +138,50 @@ def build_transforms(img_size: int, train: bool, augment: bool = True):
             transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
         ]
-    steps += [transforms.ToTensor(), transforms.Normalize(GTSRB_MEAN, GTSRB_STD)]
+    steps += [transforms.ToTensor(), transforms.Normalize(mean, std)]
     return transforms.Compose(steps)
 
 
-def make_balanced_sampler(labels: List[int]) -> WeightedRandomSampler:
+def make_balanced_sampler(labels: List[int], generator=None) -> WeightedRandomSampler:
     """Sampling with probability proportional to 1 / class frequency."""
     counts = Counter(labels)
     weights = torch.tensor([1.0 / counts[y] for y in labels], dtype=torch.double)
-    return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
+    return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True,
+                                 generator=generator)
 
 
-def build_dataloaders(cfg: dict):
-    """Return train / val / test DataLoaders according to config."""
+def _loader_kwargs(cfg: dict) -> dict:
+    return dict(batch_size=cfg["batch_size"], num_workers=cfg["num_workers"],
+                pin_memory=torch.cuda.is_available(), worker_init_fn=seed_worker)
+
+
+def build_test_loader(cfg: dict):
+    """Official test set loader, or None if GT-final_test.csv is missing."""
+    if not os.path.exists(os.path.join(cfg["data_dir"], "GT-final_test.csv")):
+        return None
+    norm = cfg.get("normalize", "gtsrb")
+    test_ds = GTSRBDataset(load_test_samples(cfg["data_dir"]),
+                           build_transforms(cfg["img_size"], False, normalize=norm), cfg["crop_roi"])
+    return DataLoader(test_ds, shuffle=False, **_loader_kwargs(cfg))
+
+
+def build_dataloaders(cfg: dict, with_test: bool = False):
+    """Return train / val (/ test if with_test) DataLoaders according to config."""
     all_train = load_train_samples(cfg["data_dir"])
     train_s, val_s = split_by_track(all_train, cfg["val_ratio"], cfg["seed"])
 
-    size, crop = cfg["img_size"], cfg["crop_roi"]
-    train_ds = GTSRBDataset(train_s, build_transforms(size, True, cfg["augment"]), crop)
-    val_ds = GTSRBDataset(val_s, build_transforms(size, False), crop)
+    size, crop, norm = cfg["img_size"], cfg["crop_roi"], cfg.get("normalize", "gtsrb")
+    train_ds = GTSRBDataset(train_s, build_transforms(size, True, cfg["augment"], norm), crop)
+    val_ds = GTSRBDataset(val_s, build_transforms(size, False, normalize=norm), crop)
 
-    sampler = make_balanced_sampler(train_ds.labels) if cfg["balanced_sampling"] else None
-    common = dict(batch_size=cfg["batch_size"], num_workers=cfg["num_workers"])
-    train_loader = DataLoader(train_ds, sampler=sampler, shuffle=sampler is None, **common)
+    # a seeded generator makes shuffling / weighted sampling reproducible
+    gen = torch.Generator().manual_seed(cfg["seed"])
+    sampler = (make_balanced_sampler(train_ds.labels, gen)
+               if cfg["balanced_sampling"] else None)
+    common = _loader_kwargs(cfg)
+    train_loader = DataLoader(train_ds, sampler=sampler, shuffle=sampler is None,
+                              generator=gen, **common)
     val_loader = DataLoader(val_ds, shuffle=False, **common)
-
-    test_loader = None
-    if os.path.exists(os.path.join(cfg["data_dir"], "GT-final_test.csv")):
-        test_ds = GTSRBDataset(load_test_samples(cfg["data_dir"]), build_transforms(size, False), crop)
-        test_loader = DataLoader(test_ds, shuffle=False, **common)
-    return train_loader, val_loader, test_loader
+    if with_test:
+        return train_loader, val_loader, build_test_loader(cfg)
+    return train_loader, val_loader

@@ -41,18 +41,21 @@ python main.py --download                 # download GTSRB (~350 MB) into data/G
 ```
 
 ```bash
-python main.py --train                    # train the custom CNN
-python main.py --train --model resnet18   # train ResNet18
+python main.py --train                    # train the custom CNN (48x48)
+python main.py --train --model resnet18   # train ResNet18 (96x96 by default)
 ```
 
 ```bash
 python main.py                                   # GUI: choose an image, see top-3 prediction
 python main.py --image my_sign.png               # prediction in the terminal
 python main.py --image my_sign.png --gradcam     # + Grad-CAM heat-map in results/
+python main.py --image my_sign.png --model resnet18
 ```
 
+> Use images **cropped tightly around the sign** — the models are trained on ROI-cropped GTSRB images, so a full street scene will be classified poorly.
+
 ```bash
-python main.py --evaluate --weights weights/latest_cnn.pt   # final test-set evaluation
+python main.py --evaluate --weights weights/best_cnn.pt     # final test-set evaluation
 ```
 
 ---
@@ -74,10 +77,12 @@ traffic-sign-recognition/
 │   ├── train.py         # training loop, grad clipping/monitoring, early stopping, experiment log
 │   ├── evaluate.py      # test accuracy, per-class report, confusion matrix, error examples
 │   ├── gradcam.py       # Grad-CAM implementation (hooks on the last conv layer)
-│   ├── eda.py           # dataset statistics & figures for the report
-│   └── utils.py         # config loading, seeding, device, class names, CLI flags
+│   ├── eda.py           # dataset statistics, mean/std & figures for the report
+│   └── utils.py         # config, seeding, device, experiment names, CLI flags
+├── tests/test_smoke.py  # end-to-end smoke tests on a fake mini-GTSRB (pytest -q)
+├── .github/             # CI workflow, PR template, issue templates
 ├── data/                # dataset (git-ignored)
-├── weights/             # trained checkpoints (git-ignored, *.pt)
+├── weights/             # checkpoints (git-ignored): <experiment>.pt, best_cnn.pt, best_resnet18.pt
 ├── results/             # experiment logs, curves, test reports
 └── report/figures/      # figures used in the written report
 ```
@@ -93,11 +98,12 @@ traffic-sign-recognition/
 | **ROI crop** | The annotation CSV gives the sign's bounding box; cropping removes background clutter. | `crop_roi` in `config.yaml` |
 | **No horizontal flip** | Flipping changes meaning ("turn left" ↔ "turn right", "keep left" ↔ "keep right"). Augmentation = small rotation, translation/scale, colour jitter. | `build_transforms` |
 | **Class imbalance** (~210 → ~2250 images per class) | `WeightedRandomSampler` with weight = 1 / class frequency; label smoothing available as an experiment. | `make_balanced_sampler` |
-| **GTSRB-specific normalisation** | Mean/std computed on GTSRB training images rather than ImageNet statistics. | `GTSRB_MEAN/STD` |
-| **Input size** | CNN: 48×48 (signs are small, 15–250 px). ResNet18: 64×64 or larger so the deep stride-32 network keeps spatial resolution. | `img_size` |
-| **Training stability** | Gradient-norm clipping (and logging), `ReduceLROnPlateau`, early stopping on val accuracy, fixed seed. | `src/train.py` |
+| **Normalisation** | GTSRB mean/std by default (verify with `python -m src.eda --stats`); `--normalize imagenet` uses the statistics the pre-trained ResNet expects — compared as an experiment. | `normalize` |
+| **Input size** | CNN: 48×48 (signs are small, 15–250 px). ResNet18 down-samples 32×, so it uses 96×96 by default (`resnet_img_size`); `small_input` replaces the 7×7/stride-2 stem + max-pool with a 3×3/stride-1 conv (8× down-sampling) for small images. | `img_size`, `resnet_img_size`, `small_input` |
+| **Training stability & reproducibility** | Gradient-norm clipping (and logging), `ReduceLROnPlateau`, early stopping on val accuracy; fixed seed for Python/NumPy/torch, DataLoader generator & workers, cuDNN deterministic mode; python/torch/device logged per run. | `src/train.py`, `src/utils.py` |
+| **Experiment bookkeeping** | The experiment name encodes every varied setting (img size, optimizer, lr, bs, aug, sampling, smoothing, dropout, normalisation, ResNet mode) and gets `_run2…` if it already exists, so no run overwrites another. `best_<model>.pt` is only replaced by a run with higher val accuracy. | `experiment_name`, `update_best` |
 | **Transfer-learning modes** | Full fine-tuning vs. frozen backbone (feature extraction) — compared as an experiment. | `freeze_backbone` |
-| **Explainability** | Grad-CAM implemented from scratch on the last conv layer of each model to check that predictions rely on the sign, not the background. | `src/gradcam.py` |
+| **Explainability** | Grad-CAM implemented from scratch to check that predictions rely on the sign, not the background. Target layer is chosen for useful resolution: CNN last ReLU (12×12 at 48 px); ResNet18 `layer3` (6×6 at 96 px) or `layer4` with `small_input` (12×12) — standard `layer4` would only be 3×3. | `src/gradcam.py`, `get_gradcam_layer` |
 
 ---
 
@@ -107,42 +113,49 @@ Every value in `config.yaml` can be overridden from the command line. Every run 
 
 ```bash
 python -m src.eda                                             # dataset statistics + figures
+python -m src.eda --stats                                     # + per-channel mean / std
+pytest -q                                                     # smoke tests (no dataset needed)
 ```
 
 ```bash
 # --- CNN baseline & ablations ---
 python -m src.train --tag baseline
-python -m src.train --lr 0.01 --tag lr1e-2
-python -m src.train --lr 0.0001 --tag lr1e-4
-python -m src.train --optimizer sgd --lr 0.01 --tag sgd
-python -m src.train --batch_size 128 --tag bs128
-python -m src.train --augment false --tag noaug
-python -m src.train --balanced_sampling false --tag nobalance
-python -m src.train --label_smoothing 0.1 --tag ls0.1
-python -m src.train --img_size 32 --tag img32
+python -m src.train --lr 0.01
+python -m src.train --lr 0.0001
+python -m src.train --optimizer sgd --lr 0.01
+python -m src.train --batch_size 128
+python -m src.train --augment false
+python -m src.train --balanced_sampling false
+python -m src.train --label_smoothing 0.1
+python -m src.train --img_size 32
+python -m src.train --dropout 0.5
 ```
 
 ```bash
 # --- ResNet18 transfer learning ---
-python -m src.train --model resnet18 --img_size 64 --lr 0.0001 --tag finetune
-python -m src.train --model resnet18 --img_size 64 --lr 0.001 --freeze_backbone true --tag frozen
-python -m src.train --model resnet18 --img_size 96 --lr 0.0001 --tag finetune96
+python -m src.train --model resnet18 --lr 0.0001                          # fine-tune, 96x96
+python -m src.train --model resnet18 --lr 0.001 --freeze_backbone true    # feature extraction
+python -m src.train --model resnet18 --lr 0.0001 --img_size 64            # input size
+python -m src.train --model resnet18 --lr 0.0001 --small_input true --img_size 64
+python -m src.train --model resnet18 --lr 0.0001 --normalize imagenet
 ```
 
 ```bash
 # --- final evaluation & explainability (after tuning only!) ---
-python -m src.evaluate --weights weights/latest_cnn.pt
-python -m src.evaluate --weights weights/latest_resnet18.pt
-python -m src.gradcam --weights weights/latest_resnet18.pt --image path/to/sign.ppm
+python -m src.evaluate --weights weights/best_cnn.pt
+python -m src.evaluate --weights weights/best_resnet18.pt
+python -m src.gradcam --weights weights/best_cnn.pt --image path/to/sign.ppm
+python -m src.gradcam --weights weights/best_resnet18.pt --image path/to/sign.ppm --layer layer3
 ```
 
 ## Outputs
 
 | File | Content |
 |------|---------|
-| `results/experiments.csv` | one summary row per run (hyper-parameters, best val acc, epoch, time) |
+| `results/experiments.csv` | one summary row per run (hyper-parameters, params, best val acc, epoch, time, python/torch/device) |
 | `results/<exp>_history.csv` / `_curves.png` | per-epoch loss, accuracy, grad norm, lr |
-| `results/<name>_test_report.txt` | test accuracy + per-class precision / recall / F1 |
+| `results/<name>_test_report.txt` | test accuracy, top-3 accuracy, macro-F1, params, ms/image, most-confused pairs, per-class P/R/F1 |
+| `results/test_results.csv` | one row per evaluated model (table for the report) |
 | `results/<name>_confusion.png` / `_errors.png` | 43×43 confusion matrix, misclassified examples |
 | `report/figures/*.png` | EDA figures (class distribution, samples, image sizes) |
 
@@ -167,11 +180,12 @@ python -m src.gradcam --weights weights/latest_resnet18.pt --image path/to/sign.
    git checkout -b feat/c-cnn-baseline
    ```
 3. Commit small, with clear messages (`Add track-based split stats to eda.py`).
-4. Open a Pull Request into `main`, write `Closes #<issue>` in the description, and attach results (val accuracy, curves, screenshots).
+4. Open a Pull Request into `main` (the PR template asks for `Closes #<issue>`, results and a checklist) and attach curves / screenshots.
 5. **At least one other member reviews** before merging; the lead merges (squash merge).
-6. **Do not commit** the dataset, `*.pt` weights or zip files (already in `.gitignore`). Share weights via the group drive; commit only small result files (`.csv`, `.png`, `.txt`).
-7. Change hyper-parameters through CLI flags or `config.yaml` in your PR — never hard-code them.
-8. Record every experiment you want in the report in `results/experiments.csv` (automatic) and mention it in your PR.
+6. **CI must be green**: GitHub Actions runs `pytest -q` on every PR. Run it locally before pushing.
+7. **Do not commit** the dataset, `*.pt` weights or zip files (already in `.gitignore`). Share weights via the group drive; commit only small result files (`.csv`, `.png`, `.txt`).
+8. Change hyper-parameters through CLI flags or `config.yaml` in your PR — never hard-code them.
+9. Record every experiment you want in the report in `results/experiments.csv` (automatic) and mention it in your PR.
 
 ---
 
