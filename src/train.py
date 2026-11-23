@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import yaml
+from matplotlib.ticker import MaxNLocator
 from tqdm import tqdm
 
 from src.dataset import build_dataloaders
@@ -47,24 +48,30 @@ def build_optimizer(cfg, params):
     return torch.optim.Adam(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, grad_clip):
+def train_one_epoch(model, loader, criterion, optimizer, device, grad_clip, scaler):
     set_train_mode(model)        # frozen BatchNorm layers stay in eval mode
+    use_amp = scaler.is_enabled()
     total_loss, correct, n, grad_norms = 0.0, 0, 0, []
     for x, y in tqdm(loader, desc="train", leave=False):
-        x, y = x.to(device), y.to(device)
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss.backward()                                    # compute gradients
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            logits = model(x)
+            loss = criterion(logits, y)
+        scaler.scale(loss).backward()                      # compute gradients
+        scaler.unscale_(optimizer)                         # real gradient values before clipping
         max_norm = grad_clip if grad_clip > 0 else float("inf")
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        grad_norms.append(norm.item())                     # monitor gradient size
-        optimizer.step()
+        if torch.isfinite(norm):                           # monitor gradient size; AMP may skip
+            grad_norms.append(norm.item())                 # steps with inf/nan gradients
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item() * x.size(0)
         correct += (logits.argmax(1) == y).sum().item()
         n += x.size(0)
-    return total_loss / n, correct / n, sum(grad_norms) / len(grad_norms)
+    avg_norm = sum(grad_norms) / len(grad_norms) if grad_norms else float("nan")
+    return total_loss / n, correct / n, avg_norm
 
 
 @torch.no_grad()
@@ -90,6 +97,7 @@ def plot_curves(history, path):
     ax2.plot(epochs, [h["val_acc"] for h in history], label="val")
     ax2.set(title="Accuracy", xlabel="epoch", ylabel="accuracy")
     for ax in (ax1, ax2):
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))   # whole epochs only
         ax.legend()
         ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -125,7 +133,14 @@ def train(cfg: dict) -> str:
     device = get_device()
     started = time.strftime("%Y-%m-%d %H:%M")
     name = unique_name(f"{experiment_name(cfg)}_{time.strftime('%m%d-%H%M')}", cfg)
-    print(f"Experiment: {name} | device: {device} | img_size: {cfg['img_size']}")
+    if device.type == "cuda":
+        # cudnn.benchmark (fastest conv algorithms) is set by set_seed: on when
+        # deterministic=false in config.yaml, off for reproducible runs
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    use_amp = cfg.get("amp", True) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    print(f"Experiment: {name} | device: {device} | img_size: {cfg['img_size']} | "
+          f"mixed precision: {use_amp}")
 
     train_loader, val_loader = build_dataloaders(cfg)
     model = build_model(cfg).to(device)
@@ -143,7 +158,7 @@ def train(cfg: dict) -> str:
     start = time.time()
     for epoch in range(1, cfg["epochs"] + 1):
         tr_loss, tr_acc, g_norm = train_one_epoch(model, train_loader, criterion,
-                                                  optimizer, device, cfg["grad_clip"])
+                                                  optimizer, device, cfg["grad_clip"], scaler)
         va_loss, va_acc = evaluate_loss_acc(model, val_loader, criterion, device)
         scheduler.step(va_loss)
         lr_now = optimizer.param_groups[0]["lr"]
@@ -181,6 +196,7 @@ def train(cfg: dict) -> str:
                    freeze_backbone=cfg.get("freeze_backbone", False),
                    small_input=cfg.get("small_input", False),
                    normalize=cfg.get("normalize", "gtsrb"), dropout=cfg.get("dropout"),
+                   amp=use_amp, deterministic=cfg.get("deterministic", True),
                    seed=cfg["seed"], params=n_params, trainable_params=n_trainable,
                    best_val_acc=round(best_acc, 4), best_epoch=best_epoch,
                    epochs_run=len(history), train_minutes=round((time.time() - start) / 60, 1),

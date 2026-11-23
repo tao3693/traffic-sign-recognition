@@ -30,11 +30,19 @@ The program can train both models, evaluate them on the official test set, and c
 
 ## Quick start
 
-Requirements: Python 3.9+, a GPU is optional.
+Requirements: Python 3.9+, a GPU is optional (training on CPU works but is slower).
 
 ```bash
 pip install -r requirements.txt
 ```
+
+**GPU training (recommended):** the code uses an NVIDIA GPU automatically when one is available, with mixed precision (`amp: true` in `config.yaml`). Install a CUDA build of PyTorch using the selector at [pytorch.org](https://pytorch.org/get-started/locally/), then check:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+For maximum speed (not bit-for-bit reproducible) set `deterministic: false` in `config.yaml`, which enables `cudnn.benchmark`.
 
 ```bash
 python main.py --download                 # download GTSRB (~350 MB) into data/GTSRB
@@ -103,7 +111,7 @@ traffic-sign-recognition/
 | **Class imbalance** (~210 → ~2250 images per class) | `WeightedRandomSampler` with weight = 1 / class frequency; label smoothing available as an experiment. | `make_balanced_sampler` |
 | **Normalisation** | GTSRB mean/std by default (verify with `python -m src.eda --stats`); `--normalize imagenet` uses the statistics the pre-trained ResNet expects — compared as an experiment. | `normalize` |
 | **Input size** | CNN: 48×48 (signs are small, 15–250 px). ResNet18 down-samples 32×, so it uses 96×96 by default (`resnet_img_size`); `small_input` replaces the 7×7/stride-2 stem + max-pool with a 3×3/stride-1 conv (8× down-sampling) for small images. | `img_size`, `resnet_img_size`, `small_input` |
-| **Training stability & reproducibility** | Gradient-norm clipping (and logging), `ReduceLROnPlateau`, early stopping on val accuracy; fixed seed for Python/NumPy/torch, DataLoader generator & workers, cuDNN deterministic mode; python/torch/device logged per run. | `src/train.py`, `src/utils.py` |
+| **Training stability & reproducibility** | Mixed-precision (AMP) training on GPU with gradient scaling; gradient-norm clipping on the unscaled gradients (and logging), `ReduceLROnPlateau`, early stopping on val accuracy; fixed seed for Python/NumPy/torch, DataLoader generator & workers, cuDNN deterministic mode; python/torch/device logged per run. | `src/train.py`, `src/utils.py` |
 | **Experiment bookkeeping** | The experiment name encodes every varied setting (img size, optimizer, lr, bs, weight decay, momentum, aug, sampling, smoothing, dropout, normalisation, ResNet mode) plus the start time, so runs never overwrite each other — not even across team members' machines. Each run writes its own `results/runs/<name>.json`; the CSV tables are generated from these files, so parallel PRs never conflict. | `experiment_name`, `src/summary.py` |
 | **Fair model selection** | `best_<model>.pt` is only replaced by a run with higher val accuracy **on the same validation split** (same `val_ratio`, `seed`, `crop_roi`). It is a local convenience; the team chooses the final model by experiment name. | `update_best` |
 | **Transfer-learning modes** | Full fine-tuning vs. frozen backbone (feature extraction) — compared as an experiment. When frozen, the backbone's BatchNorm layers are kept in eval mode too, so their ImageNet running statistics are not updated by GTSRB batches. | `freeze_backbone`, `set_train_mode` |
@@ -191,7 +199,7 @@ python -m src.gradcam --weights weights/best_resnet18.pt --image path/to/sign.pp
    ```
 3. Commit small, with clear messages (`Add track-based split stats to eda.py`).
 4. Open a Pull Request into `main` (the PR template asks for `Closes #<issue>`, results and a checklist) and attach curves / screenshots.
-5. **At least one other member reviews** before merging; the lead merges (squash merge).
+5. **At least one other member reviews** before merging; the lead merges (squash merge). Track progress on the **Projects** board.
 6. **CI must be green**: GitHub Actions runs `pytest -q` on every PR. Run it locally before pushing.
 7. **Do not commit** the dataset, `*.pt` weights or zip files (already in `.gitignore`). Share weights via the group drive; commit only small result files (`results/runs/*.json`, `results/tests/*.json`, `*_config.yaml`, `*_history.csv`, `.png`, `.txt`). `experiments.csv` / `test_results.csv` are generated — don't commit them.
 8. Change hyper-parameters through CLI flags or `config.yaml` in your PR — never hard-code them.

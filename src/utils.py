@@ -80,6 +80,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--augment", type=str2bool)
     parser.add_argument("--balanced_sampling", type=str2bool)
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--amp", type=str2bool, help="mixed precision on GPU")
+    parser.add_argument("--deterministic", type=str2bool)
     parser.add_argument("--tag", default="", help="name suffix for this experiment")
     return parser
 

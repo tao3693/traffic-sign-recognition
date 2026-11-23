@@ -35,6 +35,7 @@ momentum: 0.9                 # sgd only
 label_smoothing: 0.0
 grad_clip: 5.0                # max gradient norm (0 = disabled)
 early_stop_patience: 5
+amp: true                     # mixed precision on GPU (faster, less memory); ignored on CPU
 
 # ---- output ----
 results_dir: results

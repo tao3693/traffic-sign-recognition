@@ -152,7 +152,9 @@ def make_balanced_sampler(labels: List[int], generator=None) -> WeightedRandomSa
 
 def _loader_kwargs(cfg: dict) -> dict:
     return dict(batch_size=cfg["batch_size"], num_workers=cfg["num_workers"],
-                pin_memory=torch.cuda.is_available(), worker_init_fn=seed_worker)
+                pin_memory=torch.cuda.is_available(),          # faster CPU->GPU copy
+                persistent_workers=cfg["num_workers"] > 0,     # keep workers between epochs
+                worker_init_fn=seed_worker)
 
 
 def build_test_loader(cfg: dict):

@@ -1,0 +1,17 @@
+{
+  "experiment": "cnn_lr0.001_bs64_adam",
+  "started": "2026-11-23 (before PR #7)",
+  "model": "cnn",
+  "lr": 0.001,
+  "batch_size": 64,
+  "optimizer": "adam",
+  "img_size": 48,
+  "augment": true,
+  "balanced_sampling": true,
+  "label_smoothing": 0.0,
+  "freeze_backbone": false,
+  "best_val_acc": 0.9063,
+  "best_epoch": 3,
+  "train_minutes": 2.4,
+  "note": "legacy run made with the code before PR #7 (old experiment name, no config file); epochs / val split not recorded, grad_norm of epoch 1 logged as inf"
+}
