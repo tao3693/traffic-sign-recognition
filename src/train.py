@@ -6,42 +6,50 @@ Usage examples:
     python -m src.train                                   # use config.yaml
     python -m src.train --model resnet18 --lr 0.0001 --img_size 64
     python -m src.train --lr 0.01 --optimizer sgd --tag sgd_test
+The experiment name = settings + start time (e.g. cnn_img48_adam_lr0.001_bs64_1124-1530),
+so runs on different machines never get the same name.
+
 Outputs:
-    weights/<experiment>.pt              best checkpoint (by val accuracy)
-    weights/latest_<model>.pt            copy used by main.py
+    weights/<experiment>.pt              best checkpoint of this run (by val accuracy)
+    weights/best_<model>.pt              best checkpoint of this model ON THIS MACHINE, among
+                                         runs with the same validation split (local helper
+                                         for main.py; the team picks the final model by name)
+    results/<experiment>_config.yaml     full configuration of the run (reproducibility)
     results/<experiment>_history.csv     per-epoch loss / accuracy / grad norm
     results/<experiment>_curves.png      loss & accuracy curves
-    results/experiments.csv              one summary row per run (for the report)
+    results/runs/<experiment>.json       summary of the run (commit this file)
+    results/experiments.csv              table of all runs, regenerated from results/runs/
 """
 import argparse
-import csv
 import os
-import shutil
 import time
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
-from matplotlib.ticker import MaxNLocator
 import torch.nn as nn
+import yaml
+from matplotlib.ticker import MaxNLocator
 from tqdm import tqdm
 
 from src.dataset import build_dataloaders
-from src.models import build_model
-from src.utils import add_common_args, ensure_dirs, experiment_name, get_device, load_config, set_seed
+from src.models import build_model, set_train_mode
+from src.summary import RUNS, rebuild, save_record, write_rows
+from src.utils import (add_common_args, count_parameters, ensure_dirs, environment_info,
+                       experiment_name, get_device, load_config, set_seed, unique_name)
 
 
 def build_optimizer(cfg, params):
     params = [p for p in params if p.requires_grad]
     if cfg["optimizer"] == "sgd":
-        return torch.optim.SGD(params, lr=cfg["lr"], momentum=0.9,
+        return torch.optim.SGD(params, lr=cfg["lr"], momentum=cfg.get("momentum", 0.9),
                                weight_decay=cfg["weight_decay"])
     return torch.optim.Adam(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device, grad_clip, scaler):
-    model.train()
+    set_train_mode(model)        # frozen BatchNorm layers stay in eval mode
     use_amp = scaler.is_enabled()
     total_loss, correct, n, grad_norms = 0.0, 0, 0, []
     for x, y in tqdm(loader, desc="train", leave=False):
@@ -97,35 +105,55 @@ def plot_curves(history, path):
     plt.close(fig)
 
 
-def write_csv(path, rows, append=False):
-    exists = os.path.exists(path)
-    with open(path, "a" if append else "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        if not (append and exists):
-            writer.writeheader()
-        writer.writerows(rows)
+def validation_key(cfg: dict) -> dict:
+    """Settings that define the validation set. Val accuracies are only comparable when
+    these are equal (a different seed / ratio / crop gives a different validation set)."""
+    return dict(val_ratio=cfg["val_ratio"], seed=cfg["seed"], crop_roi=cfg["crop_roi"])
+
+
+def update_best(ckpt_path: str, best_acc: float, cfg: dict) -> bool:
+    """Copy this run's checkpoint to best_<model>.pt if it beats the stored one on the
+    SAME validation set."""
+    best_path = os.path.join(cfg["weights_dir"], f"best_{cfg['model']}.pt")
+    if os.path.exists(best_path):
+        old = torch.load(best_path, map_location="cpu", weights_only=False)
+        if old.get("val_key") != validation_key(cfg):
+            print(f"Note: {best_path} was selected on a different validation split "
+                  f"({old.get('val_key')}); not compared, not replaced.")
+            return False
+        if old.get("best_val_acc", 0.0) >= best_acc:
+            return False
+    torch.save(torch.load(ckpt_path, map_location="cpu", weights_only=False), best_path)
+    return True
 
 
 def train(cfg: dict) -> str:
-    set_seed(cfg["seed"])
+    set_seed(cfg["seed"], cfg.get("deterministic", True))
     ensure_dirs(cfg)
     device = get_device()
-    name = experiment_name(cfg)
+    started = time.strftime("%Y-%m-%d %H:%M")
+    name = unique_name(f"{experiment_name(cfg)}_{time.strftime('%m%d-%H%M')}", cfg)
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True              # pick fastest conv algorithms
+        # cudnn.benchmark (fastest conv algorithms) is set by set_seed: on when
+        # deterministic=false in config.yaml, off for reproducible runs
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     use_amp = cfg.get("amp", True) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    print(f"Experiment: {name} | device: {device} | mixed precision: {use_amp}")
+    print(f"Experiment: {name} | device: {device} | img_size: {cfg['img_size']} | "
+          f"mixed precision: {use_amp}")
 
-    train_loader, val_loader, _ = build_dataloaders(cfg)
+    train_loader, val_loader = build_dataloaders(cfg)
     model = build_model(cfg).to(device)
+    n_params, n_trainable = count_parameters(model)
+    print(f"Parameters: {n_params:,} total, {n_trainable:,} trainable")
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg["label_smoothing"])
     optimizer = build_optimizer(cfg, model.parameters())
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min",
                                                            factor=0.5, patience=2)
 
     ckpt_path = os.path.join(cfg["weights_dir"], f"{name}.pt")
+    with open(os.path.join(cfg["results_dir"], f"{name}_config.yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump(dict(cfg, experiment=name), f, sort_keys=False)
     history, best_acc, best_epoch, bad_epochs = [], 0.0, 0, 0
     start = time.time()
     for epoch in range(1, cfg["epochs"] + 1):
@@ -142,7 +170,9 @@ def train(cfg: dict) -> str:
 
         if va_acc > best_acc:
             best_acc, best_epoch, bad_epochs = va_acc, epoch, 0
-            torch.save({"model": cfg["model"], "config": cfg,
+            torch.save({"model": cfg["model"], "config": cfg, "experiment": name,
+                        "best_val_acc": best_acc, "epoch": epoch,
+                        "val_key": validation_key(cfg),
                         "state_dict": model.state_dict()}, ckpt_path)
         else:
             bad_epochs += 1
@@ -150,18 +180,32 @@ def train(cfg: dict) -> str:
                 print("Early stopping.")
                 break
 
-    shutil.copy(ckpt_path, os.path.join(cfg["weights_dir"], f"latest_{cfg['model']}.pt"))
-    write_csv(os.path.join(cfg["results_dir"], f"{name}_history.csv"), history)
+    is_best = update_best(ckpt_path, best_acc, cfg)
+    write_rows(os.path.join(cfg["results_dir"], f"{name}_history.csv"), history)
     plot_curves(history, os.path.join(cfg["results_dir"], f"{name}_curves.png"))
-    summary = dict(experiment=name, model=cfg["model"], lr=cfg["lr"], batch_size=cfg["batch_size"],
-                   optimizer=cfg["optimizer"], img_size=cfg["img_size"], augment=cfg["augment"],
+    summary = dict(experiment=name, started=started, model=cfg["model"], lr=cfg["lr"], batch_size=cfg["batch_size"],
+                   optimizer=cfg["optimizer"],
+                   momentum=cfg.get("momentum", 0.9) if cfg["optimizer"] == "sgd" else "",
+                   weight_decay=cfg["weight_decay"], epochs=cfg["epochs"],
+                   early_stop_patience=cfg["early_stop_patience"], grad_clip=cfg["grad_clip"],
+                   val_ratio=cfg["val_ratio"], crop_roi=cfg["crop_roi"],
+                   img_size=cfg["img_size"], augment=cfg["augment"],
                    balanced_sampling=cfg["balanced_sampling"],
                    label_smoothing=cfg["label_smoothing"],
+                   pretrained=cfg.get("pretrained", True) if cfg["model"] == "resnet18" else "",
                    freeze_backbone=cfg.get("freeze_backbone", False),
+                   small_input=cfg.get("small_input", False),
+                   normalize=cfg.get("normalize", "gtsrb"), dropout=cfg.get("dropout"),
+                   amp=use_amp, deterministic=cfg.get("deterministic", True),
+                   seed=cfg["seed"], params=n_params, trainable_params=n_trainable,
                    best_val_acc=round(best_acc, 4), best_epoch=best_epoch,
-                   train_minutes=round((time.time() - start) / 60, 1))
-    write_csv(os.path.join(cfg["results_dir"], "experiments.csv"), [summary], append=True)
+                   epochs_run=len(history), train_minutes=round((time.time() - start) / 60, 1),
+                   **environment_info(device))
+    save_record(cfg["results_dir"], RUNS, name, summary)
+    rebuild(cfg["results_dir"], RUNS)
     print(f"Best val acc {best_acc:.4f} at epoch {best_epoch}. Saved {ckpt_path}")
+    if is_best:
+        print(f"New overall best for {cfg['model']} -> {cfg['weights_dir']}/best_{cfg['model']}.pt")
     return ckpt_path
 
 

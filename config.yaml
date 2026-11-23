@@ -4,20 +4,25 @@
 #   python -m src.train --model resnet18 --lr 0.0001 --epochs 10
 
 seed: 42
+deterministic: true           # cuDNN deterministic mode (reproducible, slightly slower)
 
 # ---- data ----
 data_dir: data/GTSRB          # created by download_data.py
-img_size: 48                  # CNN: 32/48, ResNet: 64 or larger
+img_size: 48                  # input size for the CNN
+resnet_img_size: 96           # input size used for resnet18 unless --img_size is given
 val_ratio: 0.2                # validation split, done BY TRACK (no leakage)
 crop_roi: true                # crop the sign using the ROI in the CSV
 augment: true                 # rotation / affine / colour jitter (no flip!)
 balanced_sampling: true       # WeightedRandomSampler for class imbalance
+normalize: gtsrb              # gtsrb | imagenet  (mean/std used to normalise inputs)
 num_workers: 2
 
 # ---- model ----
 model: cnn                    # cnn | resnet18
 pretrained: true              # resnet18 only: ImageNet weights
 freeze_backbone: false        # resnet18 only: train classifier head only
+small_input: false            # resnet18 only: 3x3 stride-1 conv1 + no max-pool (for small images)
+gradcam_layer: auto           # auto | layer3 | layer4  (resnet18 only, see src/models/__init__.py)
 dropout: 0.3
 
 # ---- optimisation ----
@@ -25,7 +30,8 @@ epochs: 15
 batch_size: 64
 optimizer: adam               # adam | sgd
 lr: 0.001
-weight_decay: 0.0001
+weight_decay: 0.0001          # L2 regularisation
+momentum: 0.9                 # sgd only
 label_smoothing: 0.0
 grad_clip: 5.0                # max gradient norm (0 = disabled)
 early_stop_patience: 5

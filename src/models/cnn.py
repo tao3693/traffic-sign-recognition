@@ -3,14 +3,17 @@ import torch.nn as nn
 
 
 def conv_block(in_ch: int, out_ch: int, dropout: float) -> nn.Sequential:
-    """Two 3x3 conv layers + BatchNorm + ReLU, then 2x2 max-pool."""
+    """Two 3x3 conv layers + BatchNorm + ReLU, then 2x2 max-pool.
+
+    ReLUs are not in-place so that Grad-CAM's backward hook can be attached to them.
+    """
     return nn.Sequential(
         nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.ReLU(inplace=True),
+        nn.ReLU(),
         nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.ReLU(inplace=True),
+        nn.ReLU(),
         nn.MaxPool2d(2),
         nn.Dropout(dropout),
     )
@@ -38,5 +41,6 @@ class TrafficSignCNN(nn.Module):
 
     @property
     def gradcam_layer(self):
-        """Last conv layer, used by Grad-CAM."""
-        return self.features[-1][3]
+        """Last ReLU of the last conv block (after BN + ReLU, before pooling), used by
+        Grad-CAM. Spatial size = input / 4, e.g. 12x12 for 48x48 images."""
+        return self.features[-1][5]

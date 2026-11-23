@@ -7,6 +7,10 @@ weights/*
 *.pt
 *.pth
 
+# generated from results/runs/*.json and results/tests/*.json (python -m src.summary)
+results/experiments.csv
+results/test_results.csv
+
 # python
 __pycache__/
 *.pyc
@@ -19,3 +23,4 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+.pytest_cache/

@@ -1,6 +1,7 @@
 """Shared helpers: config loading, seeding, device selection, class names."""
 import argparse
 import os
+import platform
 import random
 from typing import Optional
 
@@ -26,39 +27,80 @@ CLASS_NAMES = [
 NUM_CLASSES = len(CLASS_NAMES)  # 43
 
 
+def str2bool(s: str) -> bool:
+    if s.lower() in ("true", "1", "yes"):
+        return True
+    if s.lower() in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true/false, got {s!r}")
+
+
 def load_config(path: str = "config.yaml", overrides: Optional[dict] = None) -> dict:
-    """Load YAML config and apply non-None command-line overrides."""
+    """Load YAML config and apply non-None command-line overrides.
+
+    ResNet18 needs larger inputs than the CNN (it down-samples 32x), so when the model is
+    resnet18 and --img_size was NOT given explicitly, `resnet_img_size` is used instead.
+    """
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    for key, value in (overrides or {}).items():
-        if value is not None:
-            cfg[key] = value
+    overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
+    model_in_file = cfg["model"]
+    cfg.update(overrides)
+    if cfg["model"] == "resnet18" and "img_size" not in overrides:
+        resnet_size = cfg.get("resnet_img_size", 96)
+        # only worth a note when the config file itself selects resnet18 (then img_size
+        # may have been meant for it); with --model resnet18 img_size is clearly the CNN's
+        if model_in_file == "resnet18" and cfg["img_size"] != resnet_size:
+            print(f"Note: resnet18 uses resnet_img_size={resnet_size} "
+                  f"(img_size={cfg['img_size']} in the config is for the CNN). "
+                  f"Pass --img_size or change resnet_img_size to use another size.")
+        cfg["img_size"] = resnet_size
     return cfg
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """CLI flags that override config.yaml (used by train / evaluate)."""
+    """CLI flags that override config.yaml (used by main.py and src/train.py)."""
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--model", choices=["cnn", "resnet18"])
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--lr", type=float)
+    parser.add_argument("--weight_decay", type=float)
+    parser.add_argument("--momentum", type=float, help="sgd only")
+    parser.add_argument("--grad_clip", type=float)
+    parser.add_argument("--early_stop_patience", type=int)
     parser.add_argument("--optimizer", choices=["adam", "sgd"])
     parser.add_argument("--img_size", type=int)
     parser.add_argument("--label_smoothing", type=float)
-    parser.add_argument("--freeze_backbone", type=lambda s: s.lower() == "true")
-    parser.add_argument("--augment", type=lambda s: s.lower() == "true")
-    parser.add_argument("--balanced_sampling", type=lambda s: s.lower() == "true")
+    parser.add_argument("--dropout", type=float)
+    parser.add_argument("--normalize", choices=["gtsrb", "imagenet"])
+    parser.add_argument("--freeze_backbone", type=str2bool)
+    parser.add_argument("--small_input", type=str2bool)
+    parser.add_argument("--pretrained", type=str2bool)
+    parser.add_argument("--augment", type=str2bool)
+    parser.add_argument("--balanced_sampling", type=str2bool)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--amp", type=str2bool, help="mixed precision on GPU")
+    parser.add_argument("--deterministic", type=str2bool)
     parser.add_argument("--tag", default="", help="name suffix for this experiment")
     return parser
 
 
-def set_seed(seed: int) -> None:
-    """Make experiments reproducible."""
+def set_seed(seed: int, deterministic: bool = True) -> None:
+    """Make experiments reproducible (also see seed_worker / DataLoader generator)."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
+
+
+def seed_worker(worker_id: int) -> None:
+    """DataLoader worker_init_fn: give every worker a reproducible numpy/random seed."""
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def get_device() -> torch.device:
@@ -69,11 +111,67 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
+def environment_info(device: torch.device) -> dict:
+    """Software / hardware versions, logged with every experiment for the report."""
+    gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else device.type
+    return dict(python=platform.python_version(), torch=torch.__version__, device=gpu)
+
+
+def count_parameters(model) -> tuple:
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
+
+
 def experiment_name(cfg: dict) -> str:
-    name = f"{cfg['model']}_lr{cfg['lr']}_bs{cfg['batch_size']}_{cfg['optimizer']}"
+    """Name that encodes every setting we vary in experiments, so runs never collide.
+
+    Settings at their usual value are left out to keep names short, e.g.
+        cnn_img48_adam_lr0.001_bs64
+        cnn_img48_adam_lr0.001_bs64_noaug_ls0.1_baseline
+        resnet18_img96_adam_lr0.0001_bs64_frozen
+    Settings not in the name (epochs, grad_clip, val_ratio, ...) are still recorded in
+    experiments.csv and in results/<name>_config.yaml.
+    """
+    name = (f"{cfg['model']}_img{cfg['img_size']}_{cfg['optimizer']}"
+            f"_lr{cfg['lr']}_bs{cfg['batch_size']}")
+    if not cfg.get("augment", True):
+        name += "_noaug"
+    if not cfg.get("balanced_sampling", True):
+        name += "_nobal"
+    if cfg.get("weight_decay", 1e-4) != 1e-4:
+        name += f"_wd{cfg['weight_decay']}"
+    if cfg["optimizer"] == "sgd" and cfg.get("momentum", 0.9) != 0.9:
+        name += f"_mom{cfg['momentum']}"
+    if cfg.get("label_smoothing", 0):
+        name += f"_ls{cfg['label_smoothing']}"
+    if cfg.get("dropout", 0.3) != 0.3:
+        name += f"_do{cfg['dropout']}"
+    if cfg.get("normalize", "gtsrb") != "gtsrb":
+        name += f"_{cfg['normalize']}norm"
+    if cfg.get("seed", 42) != 42:
+        name += f"_seed{cfg['seed']}"
+    if cfg["model"] == "resnet18":
+        if cfg.get("freeze_backbone"):
+            name += "_frozen"
+        if cfg.get("small_input"):
+            name += "_small"
+        if not cfg.get("pretrained", True):
+            name += "_scratch"
     if cfg.get("tag"):
         name += f"_{cfg['tag']}"
     return name
+
+
+def unique_name(name: str, cfg: dict) -> str:
+    """Append _run2, _run3 ... if a checkpoint or result record with this name exists."""
+    def taken(n):
+        return (os.path.exists(os.path.join(cfg["weights_dir"], f"{n}.pt"))
+                or os.path.exists(os.path.join(cfg["results_dir"], "runs", f"{n}.json")))
+    candidate, i = name, 2
+    while taken(candidate):
+        candidate, i = f"{name}_run{i}", i + 1
+    return candidate
 
 
 def ensure_dirs(cfg: dict) -> None:
