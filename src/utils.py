@@ -57,6 +57,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--lr", type=float)
+    parser.add_argument("--weight_decay", type=float)
+    parser.add_argument("--momentum", type=float, help="sgd only")
+    parser.add_argument("--grad_clip", type=float)
+    parser.add_argument("--early_stop_patience", type=int)
     parser.add_argument("--optimizer", choices=["adam", "sgd"])
     parser.add_argument("--img_size", type=int)
     parser.add_argument("--label_smoothing", type=float)
@@ -116,6 +120,8 @@ def experiment_name(cfg: dict) -> str:
         cnn_img48_adam_lr0.001_bs64
         cnn_img48_adam_lr0.001_bs64_noaug_ls0.1_baseline
         resnet18_img96_adam_lr0.0001_bs64_frozen
+    Settings not in the name (epochs, grad_clip, val_ratio, ...) are still recorded in
+    experiments.csv and in results/<name>_config.yaml.
     """
     name = (f"{cfg['model']}_img{cfg['img_size']}_{cfg['optimizer']}"
             f"_lr{cfg['lr']}_bs{cfg['batch_size']}")
@@ -123,6 +129,10 @@ def experiment_name(cfg: dict) -> str:
         name += "_noaug"
     if not cfg.get("balanced_sampling", True):
         name += "_nobal"
+    if cfg.get("weight_decay", 1e-4) != 1e-4:
+        name += f"_wd{cfg['weight_decay']}"
+    if cfg["optimizer"] == "sgd" and cfg.get("momentum", 0.9) != 0.9:
+        name += f"_mom{cfg['momentum']}"
     if cfg.get("label_smoothing", 0):
         name += f"_ls{cfg['label_smoothing']}"
     if cfg.get("dropout", 0.3) != 0.3:

@@ -68,8 +68,9 @@ def test_experiment_names_differ_for_ablations():
     base = _cfg()
     names = {experiment_name(dict(base, **kw)) for kw in [
         {}, {"augment": False}, {"balanced_sampling": False}, {"label_smoothing": 0.1},
-        {"img_size": 32}, {"dropout": 0.5}, {"normalize": "imagenet"}]}
-    assert len(names) == 7
+        {"img_size": 32}, {"dropout": 0.5}, {"normalize": "imagenet"},
+        {"weight_decay": 1e-3}, {"optimizer": "sgd", "momentum": 0.8}, {"optimizer": "sgd"}]}
+    assert len(names) == 10
 
 
 def test_split_by_track_has_no_leakage():
@@ -127,7 +128,12 @@ def test_train_evaluate_gradcam_predict(tmp_path, monkeypatch):
     ckpt2 = train(dict(cfg))                       # same settings -> must not overwrite
     assert ckpt2 != ckpt and ckpt2.endswith("_run2.pt")
     with open(os.path.join(cfg["results_dir"], "experiments.csv")) as f:
-        assert len(list(csv.DictReader(f))) == 2
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2 and rows[0]["weight_decay"] == str(cfg["weight_decay"])
+    name = os.path.splitext(os.path.basename(ckpt))[0]
+    with open(os.path.join(cfg["results_dir"], f"{name}_config.yaml")) as f:
+        saved = yaml.safe_load(f)
+    assert saved["weight_decay"] == cfg["weight_decay"] and saved["experiment"] == name
 
     from src import evaluate
     monkeypatch.setattr(sys, "argv", ["evaluate", "--weights", best])

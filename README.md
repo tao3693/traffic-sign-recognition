@@ -101,7 +101,7 @@ traffic-sign-recognition/
 | **Normalisation** | GTSRB mean/std by default (verify with `python -m src.eda --stats`); `--normalize imagenet` uses the statistics the pre-trained ResNet expects — compared as an experiment. | `normalize` |
 | **Input size** | CNN: 48×48 (signs are small, 15–250 px). ResNet18 down-samples 32×, so it uses 96×96 by default (`resnet_img_size`); `small_input` replaces the 7×7/stride-2 stem + max-pool with a 3×3/stride-1 conv (8× down-sampling) for small images. | `img_size`, `resnet_img_size`, `small_input` |
 | **Training stability & reproducibility** | Gradient-norm clipping (and logging), `ReduceLROnPlateau`, early stopping on val accuracy; fixed seed for Python/NumPy/torch, DataLoader generator & workers, cuDNN deterministic mode; python/torch/device logged per run. | `src/train.py`, `src/utils.py` |
-| **Experiment bookkeeping** | The experiment name encodes every varied setting (img size, optimizer, lr, bs, aug, sampling, smoothing, dropout, normalisation, ResNet mode) and gets `_run2…` if it already exists, so no run overwrites another. `best_<model>.pt` is only replaced by a run with higher val accuracy. | `experiment_name`, `update_best` |
+| **Experiment bookkeeping** | The experiment name encodes every varied setting (img size, optimizer, lr, bs, weight decay, momentum, aug, sampling, smoothing, dropout, normalisation, ResNet mode) and gets `_run2…` if it already exists, so no run overwrites another. `best_<model>.pt` is only replaced by a run with higher val accuracy. | `experiment_name`, `update_best` |
 | **Transfer-learning modes** | Full fine-tuning vs. frozen backbone (feature extraction) — compared as an experiment. | `freeze_backbone` |
 | **Explainability** | Grad-CAM implemented from scratch to check that predictions rely on the sign, not the background. Target layer is chosen for useful resolution: CNN last ReLU (12×12 at 48 px); ResNet18 `layer3` (6×6 at 96 px) or `layer4` with `small_input` (12×12) — standard `layer4` would only be 3×3. | `src/gradcam.py`, `get_gradcam_layer` |
 
@@ -127,6 +127,7 @@ python -m src.train --batch_size 128
 python -m src.train --augment false
 python -m src.train --balanced_sampling false
 python -m src.train --label_smoothing 0.1
+python -m src.train --weight_decay 0.001
 python -m src.train --img_size 32
 python -m src.train --dropout 0.5
 ```
@@ -152,7 +153,8 @@ python -m src.gradcam --weights weights/best_resnet18.pt --image path/to/sign.pp
 
 | File | Content |
 |------|---------|
-| `results/experiments.csv` | one summary row per run (hyper-parameters, params, best val acc, epoch, time, python/torch/device) |
+| `results/experiments.csv` | one summary row per run (all hyper-parameters incl. weight decay, epochs, grad clip, val split; params, best val acc, epoch, time, python/torch/device) |
+| `results/<exp>_config.yaml` | full configuration of the run — every setting, even those not in the name |
 | `results/<exp>_history.csv` / `_curves.png` | per-epoch loss, accuracy, grad norm, lr |
 | `results/<name>_test_report.txt` | test accuracy, top-3 accuracy, macro-F1, params, ms/image, most-confused pairs, per-class P/R/F1 |
 | `results/test_results.csv` | one row per evaluated model (table for the report) |

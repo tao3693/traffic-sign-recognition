@@ -10,6 +10,7 @@ Outputs:
     weights/<experiment>.pt              best checkpoint of this run (by val accuracy)
     weights/best_<model>.pt              best checkpoint over ALL runs of this model
                                          (only replaced when a run beats it; used by main.py)
+    results/<experiment>_config.yaml     full configuration of the run (reproducibility)
     results/<experiment>_history.csv     per-epoch loss / accuracy / grad norm
     results/<experiment>_curves.png      loss & accuracy curves
     results/experiments.csv              one summary row per run (for the report)
@@ -24,6 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import yaml
 from tqdm import tqdm
 
 from src.dataset import build_dataloaders
@@ -35,7 +37,7 @@ from src.utils import (add_common_args, count_parameters, ensure_dirs, environme
 def build_optimizer(cfg, params):
     params = [p for p in params if p.requires_grad]
     if cfg["optimizer"] == "sgd":
-        return torch.optim.SGD(params, lr=cfg["lr"], momentum=0.9,
+        return torch.optim.SGD(params, lr=cfg["lr"], momentum=cfg.get("momentum", 0.9),
                                weight_decay=cfg["weight_decay"])
     return torch.optim.Adam(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
 
@@ -133,6 +135,8 @@ def train(cfg: dict) -> str:
                                                            factor=0.5, patience=2)
 
     ckpt_path = os.path.join(cfg["weights_dir"], f"{name}.pt")
+    with open(os.path.join(cfg["results_dir"], f"{name}_config.yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump(dict(cfg, experiment=name), f, sort_keys=False)
     history, best_acc, best_epoch, bad_epochs = [], 0.0, 0, 0
     start = time.time()
     for epoch in range(1, cfg["epochs"] + 1):
@@ -162,9 +166,15 @@ def train(cfg: dict) -> str:
     write_csv(os.path.join(cfg["results_dir"], f"{name}_history.csv"), history)
     plot_curves(history, os.path.join(cfg["results_dir"], f"{name}_curves.png"))
     summary = dict(experiment=name, model=cfg["model"], lr=cfg["lr"], batch_size=cfg["batch_size"],
-                   optimizer=cfg["optimizer"], img_size=cfg["img_size"], augment=cfg["augment"],
+                   optimizer=cfg["optimizer"],
+                   momentum=cfg.get("momentum", 0.9) if cfg["optimizer"] == "sgd" else "",
+                   weight_decay=cfg["weight_decay"], epochs=cfg["epochs"],
+                   early_stop_patience=cfg["early_stop_patience"], grad_clip=cfg["grad_clip"],
+                   val_ratio=cfg["val_ratio"], crop_roi=cfg["crop_roi"],
+                   img_size=cfg["img_size"], augment=cfg["augment"],
                    balanced_sampling=cfg["balanced_sampling"],
                    label_smoothing=cfg["label_smoothing"],
+                   pretrained=cfg.get("pretrained", True) if cfg["model"] == "resnet18" else "",
                    freeze_backbone=cfg.get("freeze_backbone", False),
                    small_input=cfg.get("small_input", False),
                    normalize=cfg.get("normalize", "gtsrb"), dropout=cfg.get("dropout"),
