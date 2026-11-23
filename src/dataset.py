@@ -143,7 +143,9 @@ def build_dataloaders(cfg: dict):
     val_ds = GTSRBDataset(val_s, build_transforms(size, False), crop)
 
     sampler = make_balanced_sampler(train_ds.labels) if cfg["balanced_sampling"] else None
-    common = dict(batch_size=cfg["batch_size"], num_workers=cfg["num_workers"])
+    common = dict(batch_size=cfg["batch_size"], num_workers=cfg["num_workers"],
+                  pin_memory=torch.cuda.is_available(),          # faster CPU->GPU copy
+                  persistent_workers=cfg["num_workers"] > 0)
     train_loader = DataLoader(train_ds, sampler=sampler, shuffle=sampler is None, **common)
     val_loader = DataLoader(val_ds, shuffle=False, **common)
 

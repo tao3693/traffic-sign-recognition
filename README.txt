@@ -18,6 +18,9 @@ Grad-CAM heat-maps show which part of the image the model looked at.
   * Python 3.9 or newer
   * Packages:  pip install -r requirements.txt
   * A GPU is optional (training on CPU works but is slower)
+  * GPU: the program uses an NVIDIA GPU automatically if PyTorch was
+    installed with CUDA support (see https://pytorch.org/get-started/locally/).
+    Mixed precision is enabled by "amp: true" in config.yaml.
 
 3. QUICK START
 --------------
