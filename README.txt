@@ -29,7 +29,8 @@ Grad-CAM heat-maps show which part of the image the model looked at.
             python main.py --train                 (custom CNN, 48x48 input)
             python main.py --train --model resnet18   (ResNet18, 96x96 input)
           The best model of each type is kept as weights/best_cnn.pt and
-          weights/best_resnet18.pt (only replaced when a new run is better).
+          weights/best_resnet18.pt (only replaced when a new run is better
+          on the same validation split).
   Step 4  Use the program
             python main.py                         (opens the GUI)
             python main.py --image my_sign.png     (prediction in terminal)
@@ -51,6 +52,7 @@ Grad-CAM heat-maps show which part of the image the model looked at.
   src/evaluate.py    test accuracy, classification report, confusion matrix
   src/gradcam.py     Grad-CAM visualisation
   src/eda.py         dataset statistics and figures for the report
+  src/summary.py     builds the result tables from results/runs/*.json
   tests/             smoke tests (run: pytest -q)
   results/           experiment logs and figures
   weights/           trained model files
@@ -62,8 +64,10 @@ Grad-CAM heat-maps show which part of the image the model looked at.
   python -m src.train --augment false --tag noaug
   python -m src.train --model resnet18 --freeze_backbone true
   python -m src.train --model resnet18 --small_input true --img_size 64
-Every run adds one row to results/experiments.csv. The experiment name
-encodes the settings, so runs never overwrite each other.
+Every run saves results/runs/<experiment>.json and updates the table
+results/experiments.csv (rebuild it with: python -m src.summary).
+The experiment name encodes the settings and the start time, so runs
+never overwrite each other.
 
 6. DATASET
 ----------

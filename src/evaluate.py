@@ -3,15 +3,16 @@ Final evaluation on the official GTSRB test set (use ONLY after tuning is finish
 
 Usage:
     python -m src.evaluate --weights weights/best_cnn.pt
-Outputs (results/):
+Outputs (results/), <name> = experiment name stored in the checkpoint, so the files are
+the same whether you pass weights/best_cnn.pt or weights/<experiment>.pt:
     <name>_test_report.txt      accuracy, top-3 accuracy, macro-F1, parameters, inference
                                 time, most-confused class pairs, per-class P / R / F1
     <name>_confusion.png        43x43 normalised confusion matrix
     <name>_errors.png           examples of misclassified signs (with class names)
-    test_results.csv            one summary row per evaluated model (for the report table)
+    tests/<name>.json           summary of this evaluation (commit this file)
+    test_results.csv            table of all evaluations, regenerated from tests/
 """
 import argparse
-import csv
 import os
 import time
 
@@ -24,6 +25,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 
 from src.dataset import build_test_loader, norm_stats
 from src.models import build_model
+from src.summary import TESTS, rebuild, save_record
 from src.utils import CLASS_NAMES, count_parameters, get_device
 
 N_CLASSES = len(CLASS_NAMES)
@@ -33,6 +35,7 @@ def load_checkpoint(path: str, device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
     cfg["pretrained"] = False           # weights come from the checkpoint, no download needed
+    cfg["experiment"] = ckpt.get("experiment", os.path.splitext(os.path.basename(path))[0])
     model = build_model(cfg).to(device)
     # older checkpoints stored a duplicate "gradcam_layer.*" copy of layer4 -> drop it
     state = {k: v for k, v in ckpt["state_dict"].items() if not k.startswith("gradcam_layer.")}
@@ -46,9 +49,12 @@ def predict_loader(model, loader, device, keep_errors=16, topk=3):
     """Return predictions, labels, top-k hit flags, the first `keep_errors` misclassified
     images (only those are kept in memory) and the average inference time per image."""
     preds, labels, topk_hit, errors = [], [], [], []
-    seconds, n = 0.0, 0
+    seconds, n, warmed_up = 0.0, 0, False
     for x, y in loader:
         x = x.to(device)
+        if not warmed_up:                # first call is slow (memory allocation, cuDNN setup)
+            model(x)
+            warmed_up = True
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -115,15 +121,6 @@ def plot_errors(errors, cfg, path):
     plt.close(fig)
 
 
-def append_row(path, row):
-    exists = os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if not exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Evaluate on the GTSRB test set")
     parser.add_argument("--weights", default="weights/best_cnn.pt")
@@ -144,10 +141,10 @@ def main():
     report = classification_report(labels, preds, labels=all_cls, target_names=CLASS_NAMES,
                                    digits=4, zero_division=0)
 
-    name = os.path.splitext(os.path.basename(args.weights))[0]
+    name = cfg["experiment"]
     out = cfg["results_dir"]
     os.makedirs(out, exist_ok=True)
-    lines = [f"Model: {name}  ({cfg['model']}, img_size {cfg['img_size']})",
+    lines = [f"Model: {name}  ({cfg['model']}, img_size {cfg['img_size']}, file {args.weights})",
              f"Test images: {len(labels)}",
              f"Test accuracy:  {acc:.4f}",
              f"Top-3 accuracy: {top3.mean():.4f}",
@@ -161,11 +158,13 @@ def main():
         f.write("\n".join(lines) + "\n\n" + report)
     plot_confusion(cm, os.path.join(out, f"{name}_confusion.png"))
     plot_errors(errors, cfg, os.path.join(out, f"{name}_errors.png"))
-    append_row(os.path.join(out, "test_results.csv"),
-               dict(weights=name, model=cfg["model"], img_size=cfg["img_size"],
-                    test_acc=round(acc, 4), top3_acc=round(float(top3.mean()), 4),
-                    macro_f1=round(macro_f1, 4), params=n_params,
-                    ms_per_image=round(ms, 3), device=str(device)))
+    save_record(out, TESTS, name,
+                dict(experiment=name, evaluated=time.strftime("%Y-%m-%d %H:%M"),
+                     model=cfg["model"], img_size=cfg["img_size"],
+                     test_acc=round(acc, 4), top3_acc=round(float(top3.mean()), 4),
+                     macro_f1=round(macro_f1, 4), params=n_params,
+                     ms_per_image=round(ms, 3), device=str(device)))
+    rebuild(out, TESTS)
     print("\n".join(lines[:7]))
     print(f"Report saved in {out}/")
 

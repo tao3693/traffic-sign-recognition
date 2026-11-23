@@ -44,9 +44,17 @@ def load_config(path: str = "config.yaml", overrides: Optional[dict] = None) -> 
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
+    model_in_file = cfg["model"]
     cfg.update(overrides)
     if cfg["model"] == "resnet18" and "img_size" not in overrides:
-        cfg["img_size"] = cfg.get("resnet_img_size", 96)
+        resnet_size = cfg.get("resnet_img_size", 96)
+        # only worth a note when the config file itself selects resnet18 (then img_size
+        # may have been meant for it); with --model resnet18 img_size is clearly the CNN's
+        if model_in_file == "resnet18" and cfg["img_size"] != resnet_size:
+            print(f"Note: resnet18 uses resnet_img_size={resnet_size} "
+                  f"(img_size={cfg['img_size']} in the config is for the CNN). "
+                  f"Pass --img_size or change resnet_img_size to use another size.")
+        cfg["img_size"] = resnet_size
     return cfg
 
 
@@ -153,10 +161,13 @@ def experiment_name(cfg: dict) -> str:
     return name
 
 
-def unique_name(name: str, weights_dir: str) -> str:
-    """Append _run2, _run3 ... if a checkpoint with this name already exists."""
+def unique_name(name: str, cfg: dict) -> str:
+    """Append _run2, _run3 ... if a checkpoint or result record with this name exists."""
+    def taken(n):
+        return (os.path.exists(os.path.join(cfg["weights_dir"], f"{n}.pt"))
+                or os.path.exists(os.path.join(cfg["results_dir"], "runs", f"{n}.json")))
     candidate, i = name, 2
-    while os.path.exists(os.path.join(weights_dir, f"{candidate}.pt")):
+    while taken(candidate):
         candidate, i = f"{name}_run{i}", i + 1
     return candidate
 

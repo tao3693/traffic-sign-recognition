@@ -17,7 +17,7 @@ sys.path.insert(0, ROOT)
 
 from src.dataset import Sample, split_by_track                       # noqa: E402
 from src.gradcam import GradCAM                                      # noqa: E402
-from src.models import build_model, get_gradcam_layer                # noqa: E402
+from src.models import build_model, get_gradcam_layer, set_train_mode  # noqa: E402
 from src.utils import NUM_CLASSES, experiment_name, load_config      # noqa: E402
 
 FIELDS = ["Filename", "Width", "Height", "Roi.X1", "Roi.Y1", "Roi.X2", "Roi.Y2", "ClassId"]
@@ -56,12 +56,37 @@ def test_gradcam_frozen_backbone_and_hooks_removed():
     assert not layer._forward_hooks and not layer._backward_hooks
 
 
+@pytest.mark.parametrize("small", [False, True])
+def test_frozen_backbone_batchnorm_statistics_do_not_change(small):
+    cfg = _cfg(model="resnet18", img_size=64, freeze_backbone=True, small_input=small)
+    net = build_model(cfg)
+    frozen_bn = net.layer1[0].bn1
+    before = frozen_bn.running_mean.clone()
+    set_train_mode(net)
+    net(torch.randn(4, 3, 64, 64) * 3 + 1)
+    assert torch.equal(before, frozen_bn.running_mean)          # frozen BN untouched
+    assert net.fc.training and not frozen_bn.training
+    assert net.bn1.training == small                             # new stem BN is trainable
+    assert all(p.requires_grad for p in net.bn1.parameters()) == small
+
+
 # ------------------------------------------------------------------ config / naming
 def test_resnet_uses_resnet_img_size_unless_overridden():
     path = os.path.join(ROOT, "config.yaml")
     assert load_config(path, {"model": "resnet18"})["img_size"] == 96
     assert load_config(path, {"model": "resnet18", "img_size": 64})["img_size"] == 64
     assert load_config(path, {"model": "cnn"})["img_size"] == 48
+
+
+def test_summary_tables_union_columns(tmp_path):
+    from src.summary import RUNS, load_records, rebuild, save_record
+    save_record(str(tmp_path), RUNS, "a", {"experiment": "a", "started": "1", "lr": 0.1})
+    save_record(str(tmp_path), RUNS, "b", {"experiment": "b", "started": "2", "wd": 0.01})
+    path = rebuild(str(tmp_path), RUNS)
+    with open(path) as f:
+        rows = list(csv.DictReader(f))
+    assert [r["experiment"] for r in rows] == ["a", "b"] and rows[0]["wd"] == ""
+    assert len(load_records(str(tmp_path), RUNS)) == 2
 
 
 def test_experiment_names_differ_for_ablations():
@@ -126,11 +151,20 @@ def test_train_evaluate_gradcam_predict(tmp_path, monkeypatch):
     best = os.path.join(cfg["weights_dir"], "best_cnn.pt")
     assert os.path.exists(ckpt) and os.path.exists(best)
     ckpt2 = train(dict(cfg))                       # same settings -> must not overwrite
-    assert ckpt2 != ckpt and ckpt2.endswith("_run2.pt")
+    assert ckpt2 != ckpt
+    name = os.path.splitext(os.path.basename(ckpt))[0]
+    runs = os.path.join(cfg["results_dir"], "runs")
+    assert sorted(os.listdir(runs)) == sorted(
+        os.path.splitext(os.path.basename(c))[0] + ".json" for c in (ckpt, ckpt2))
     with open(os.path.join(cfg["results_dir"], "experiments.csv")) as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 2 and rows[0]["weight_decay"] == str(cfg["weight_decay"])
-    name = os.path.splitext(os.path.basename(ckpt))[0]
+
+    # a run on a different validation split must not replace best_cnn.pt
+    from src.train import update_best
+    best_before = torch.load(best, weights_only=False)["experiment"]
+    assert not update_best(ckpt2, 1.0, dict(cfg, seed=7))
+    assert torch.load(best, weights_only=False)["experiment"] == best_before
     with open(os.path.join(cfg["results_dir"], f"{name}_config.yaml")) as f:
         saved = yaml.safe_load(f)
     assert saved["weight_decay"] == cfg["weight_decay"] and saved["experiment"] == name
@@ -138,7 +172,8 @@ def test_train_evaluate_gradcam_predict(tmp_path, monkeypatch):
     from src import evaluate
     monkeypatch.setattr(sys, "argv", ["evaluate", "--weights", best])
     evaluate.main()
-    assert os.path.exists(os.path.join(cfg["results_dir"], "best_cnn_test_report.txt"))
+    assert os.path.exists(os.path.join(cfg["results_dir"], f"{best_before}_test_report.txt"))
+    assert os.path.exists(os.path.join(cfg["results_dir"], "tests", f"{best_before}.json"))
     assert os.path.exists(os.path.join(cfg["results_dir"], "test_results.csv"))
 
     from src.gradcam import run_gradcam

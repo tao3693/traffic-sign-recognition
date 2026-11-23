@@ -78,11 +78,14 @@ traffic-sign-recognition/
 │   ├── evaluate.py      # test accuracy, per-class report, confusion matrix, error examples
 │   ├── gradcam.py       # Grad-CAM implementation (hooks on the last conv layer)
 │   ├── eda.py           # dataset statistics, mean/std & figures for the report
+│   ├── summary.py       # per-run JSON records -> experiments.csv / test_results.csv
 │   └── utils.py         # config, seeding, device, experiment names, CLI flags
 ├── tests/test_smoke.py  # end-to-end smoke tests on a fake mini-GTSRB (pytest -q)
 ├── .github/             # CI workflow, PR template, issue templates
 ├── data/                # dataset (git-ignored)
 ├── weights/             # checkpoints (git-ignored): <experiment>.pt, best_cnn.pt, best_resnet18.pt
+├── results/runs/        # one JSON per training run (committed)
+├── results/tests/       # one JSON per test-set evaluation (committed)
 ├── results/             # experiment logs, curves, test reports
 └── report/figures/      # figures used in the written report
 ```
@@ -101,15 +104,18 @@ traffic-sign-recognition/
 | **Normalisation** | GTSRB mean/std by default (verify with `python -m src.eda --stats`); `--normalize imagenet` uses the statistics the pre-trained ResNet expects — compared as an experiment. | `normalize` |
 | **Input size** | CNN: 48×48 (signs are small, 15–250 px). ResNet18 down-samples 32×, so it uses 96×96 by default (`resnet_img_size`); `small_input` replaces the 7×7/stride-2 stem + max-pool with a 3×3/stride-1 conv (8× down-sampling) for small images. | `img_size`, `resnet_img_size`, `small_input` |
 | **Training stability & reproducibility** | Gradient-norm clipping (and logging), `ReduceLROnPlateau`, early stopping on val accuracy; fixed seed for Python/NumPy/torch, DataLoader generator & workers, cuDNN deterministic mode; python/torch/device logged per run. | `src/train.py`, `src/utils.py` |
-| **Experiment bookkeeping** | The experiment name encodes every varied setting (img size, optimizer, lr, bs, weight decay, momentum, aug, sampling, smoothing, dropout, normalisation, ResNet mode) and gets `_run2…` if it already exists, so no run overwrites another. `best_<model>.pt` is only replaced by a run with higher val accuracy. | `experiment_name`, `update_best` |
-| **Transfer-learning modes** | Full fine-tuning vs. frozen backbone (feature extraction) — compared as an experiment. | `freeze_backbone` |
+| **Experiment bookkeeping** | The experiment name encodes every varied setting (img size, optimizer, lr, bs, weight decay, momentum, aug, sampling, smoothing, dropout, normalisation, ResNet mode) plus the start time, so runs never overwrite each other — not even across team members' machines. Each run writes its own `results/runs/<name>.json`; the CSV tables are generated from these files, so parallel PRs never conflict. | `experiment_name`, `src/summary.py` |
+| **Fair model selection** | `best_<model>.pt` is only replaced by a run with higher val accuracy **on the same validation split** (same `val_ratio`, `seed`, `crop_roi`). It is a local convenience; the team chooses the final model by experiment name. | `update_best` |
+| **Transfer-learning modes** | Full fine-tuning vs. frozen backbone (feature extraction) — compared as an experiment. When frozen, the backbone's BatchNorm layers are kept in eval mode too, so their ImageNet running statistics are not updated by GTSRB batches. | `freeze_backbone`, `set_train_mode` |
 | **Explainability** | Grad-CAM implemented from scratch to check that predictions rely on the sign, not the background. Target layer is chosen for useful resolution: CNN last ReLU (12×12 at 48 px); ResNet18 `layer3` (6×6 at 96 px) or `layer4` with `small_input` (12×12) — standard `layer4` would only be 3×3. | `src/gradcam.py`, `get_gradcam_layer` |
 
 ---
 
 ## Running experiments
 
-Every value in `config.yaml` can be overridden from the command line. Every run appends one row to `results/experiments.csv`, which becomes the results table in the report. Use `--tag` to give runs readable names.
+Every value in `config.yaml` can be overridden from the command line. Every run writes `results/runs/<experiment>.json` and regenerates `results/experiments.csv` (the results table for the report). After pulling teammates' results, run `python -m src.summary` to rebuild the tables. Use `--tag` to give runs readable names.
+
+> ResNet18 input size: `--model resnet18` uses `resnet_img_size` (96) unless you pass `--img_size`; the `img_size` key is for the CNN.
 
 ```bash
 python -m src.eda                                             # dataset statistics + figures
@@ -153,12 +159,14 @@ python -m src.gradcam --weights weights/best_resnet18.pt --image path/to/sign.pp
 
 | File | Content |
 |------|---------|
-| `results/experiments.csv` | one summary row per run (all hyper-parameters incl. weight decay, epochs, grad clip, val split; params, best val acc, epoch, time, python/torch/device) |
+| `results/runs/<exp>.json` | summary of one run: all hyper-parameters incl. weight decay, epochs, grad clip, val split; params, best val acc, epoch, time, python/torch/device — **commit it** |
+| `results/experiments.csv` | table of all runs, generated from `results/runs/` (git-ignored; `python -m src.summary`) |
 | `results/<exp>_config.yaml` | full configuration of the run — every setting, even those not in the name |
 | `results/<exp>_history.csv` / `_curves.png` | per-epoch loss, accuracy, grad norm, lr |
-| `results/<name>_test_report.txt` | test accuracy, top-3 accuracy, macro-F1, params, ms/image, most-confused pairs, per-class P/R/F1 |
-| `results/test_results.csv` | one row per evaluated model (table for the report) |
-| `results/<name>_confusion.png` / `_errors.png` | 43×43 confusion matrix, misclassified examples |
+| `results/<exp>_test_report.txt` | test accuracy, top-3 accuracy, macro-F1, params, ms/image, most-confused pairs, per-class P/R/F1 |
+| `results/tests/<exp>.json` | summary of one test-set evaluation — **commit it** |
+| `results/test_results.csv` | table of all evaluations, generated from `results/tests/` (git-ignored) |
+| `results/<exp>_confusion.png` / `_errors.png` | 43×43 confusion matrix, misclassified examples |
 | `report/figures/*.png` | EDA figures (class distribution, samples, image sizes) |
 
 ---
@@ -185,9 +193,10 @@ python -m src.gradcam --weights weights/best_resnet18.pt --image path/to/sign.pp
 4. Open a Pull Request into `main` (the PR template asks for `Closes #<issue>`, results and a checklist) and attach curves / screenshots.
 5. **At least one other member reviews** before merging; the lead merges (squash merge).
 6. **CI must be green**: GitHub Actions runs `pytest -q` on every PR. Run it locally before pushing.
-7. **Do not commit** the dataset, `*.pt` weights or zip files (already in `.gitignore`). Share weights via the group drive; commit only small result files (`.csv`, `.png`, `.txt`).
+7. **Do not commit** the dataset, `*.pt` weights or zip files (already in `.gitignore`). Share weights via the group drive; commit only small result files (`results/runs/*.json`, `results/tests/*.json`, `*_config.yaml`, `*_history.csv`, `.png`, `.txt`). `experiments.csv` / `test_results.csv` are generated — don't commit them.
 8. Change hyper-parameters through CLI flags or `config.yaml` in your PR — never hard-code them.
-9. Record every experiment you want in the report in `results/experiments.csv` (automatic) and mention it in your PR.
+9. Mention every experiment you want in the report by its **experiment name** in your PR (its `results/runs/<name>.json` is the record).
+10. **Final models are chosen by the team, by experiment name** — compare runs in `experiments.csv` that share the same validation split (`val_ratio`, `seed`, `crop_roi`). The lead uploads the chosen checkpoints to the shared drive as `best_cnn.pt` / `best_resnet18.pt`; everyone evaluates and demos with those files. Your local `weights/best_*.pt` is only your own best run.
 
 ---
 

@@ -17,8 +17,6 @@ import argparse
 import os
 import sys
 
-from src.utils import add_common_args
-
 _MODEL_CACHE = {}
 
 
@@ -95,6 +93,12 @@ def launch_gui(weights: str):
 
 
 def main():
+    if "--download" in sys.argv:       # works before torch is installed
+        import download_data
+        download_data.main()
+        return
+
+    from src.utils import add_common_args
     parser = argparse.ArgumentParser(description="Traffic Sign Recognition (GTSRB)")
     parser.add_argument("--image", help="image to classify")
     parser.add_argument("--weights", help="checkpoint (default: weights/best_<model>.pt)")
@@ -106,10 +110,7 @@ def main():
     args = parser.parse_args()
     weights = args.weights or default_weights(args.model)
 
-    if args.download:
-        import download_data
-        download_data.main()
-    elif args.train:
+    if args.train:
         from src.train import train
         from src.utils import load_config
         overrides = {k: v for k, v in vars(args).items()

@@ -18,5 +18,6 @@ Closes #
 ## Checklist
 - [ ] `pytest -q` passes locally (or the CI check is green)
 - [ ] No dataset, zip or `.pt` files committed (weights go to the shared drive)
+- [ ] For experiments: `results/runs/<name>.json` committed; `experiments.csv` NOT committed (it is generated)
 - [ ] Hyper-parameters changed via `config.yaml` / CLI flags, not hard-coded
 - [ ] Someone else has been requested as reviewer
